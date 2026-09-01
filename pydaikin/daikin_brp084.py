@@ -110,15 +110,18 @@ class DaikinBRP084(Appliance):
         "comfort": E_1002_E_3003_PATH + ["p_1D"],
         # Econo (e_3003/p_24): 00=off, 01=on. Verified live read+write.
         "econo": E_1002_E_3003_PATH + ["p_24"],
+        # Indoor-unit runtime and load demand (read-only).
+        "working": E_1002_E_3003_PATH + ["p_02"],
+        "idu_delta_d_command": E_1002_E_3003_PATH + ["p_2A"],
         # Outdoor unit quiet (outdoor e_3002/p_3D): 00=off, 01=on.
         "outdoor_quiet": E_1003_PATH + ["e_3002", "p_3D"],
         # Powerful (outdoor e_3002/p_44): 00=off, 01=on. Verified live
         # read+write; the unit also auto-cancels after ~20 min.
         "powerful": E_1003_PATH + ["e_3002", "p_44"],
         "dry_comfort_offset": E_1002_E_3001_PATH + ["p_34"],
-        # Outdoor unit sensors (read-only)
-        "compressor_temp": E_1003_PATH + ["e_A005", "p_01"],
-        "discharge_temp": E_1003_PATH + ["e_A005", "p_02"],
+        # Outdoor-unit runtime corroboration and shared instantaneous power.
+        "outdoor_working": E_1003_PATH + ["e_2006", "p_01"],
+        "instantaneous_power": E_1003_PATH + ["e_A005", "p_01"],
         "indoor_model": E_1002_PATH + ["e_A001", "p_01"],
         "outdoor_model": E_1003_PATH + ["e_A001", "p_01"],
         # Mode-specific paths for temperature settings
@@ -344,6 +347,12 @@ class DaikinBRP084(Appliance):
     @staticmethod
     def find_value_by_pn(data: dict, fr: str, *keys):
         """Find values in nested response data."""
+        node = DaikinBRP084.find_node_by_pn(data, fr, *keys)
+        return node.get("pv") if node is not None else None
+
+    @staticmethod
+    def find_node_by_pn(data: dict, fr: str, *keys) -> Optional[dict]:
+        """Find a property node in nested response data."""
         data = [x['pc'] for x in data['responses'] if x['fr'] == fr]
 
         while keys:
@@ -353,13 +362,32 @@ class DaikinBRP084(Appliance):
             for pcs in data:
                 if pcs['pn'] == current_key:
                     if not keys:
-                        return pcs['pv']
+                        return pcs
                     data = pcs['pch']
                     found = True
                     break
             if not found:
                 raise DaikinException(f'Key {current_key} not found')
         return None
+
+    @classmethod
+    def decode_dsiot_numeric(cls, node: dict) -> float:
+        """Decode a little-endian DSIOT binary-step property.
+
+        The low nibble of ``md.st`` is the step base. The high nibble is a
+        signed decimal exponent. For example, ``0x11`` means a step of 10.
+        """
+        metadata = node.get("md", {})
+        step_byte = metadata.get("st")
+        if metadata.get("pt") != "b" or not isinstance(step_byte, int):
+            raise ValueError("DSIOT property is missing binary-step metadata")
+
+        raw_value = cls.hex_le_to_int(node["pv"])
+        step_base = step_byte & 0x0F
+        exponent = (step_byte & 0xF0) >> 4
+        if exponent >= 8:
+            exponent -= 16
+        return float(raw_value * step_base * (10**exponent))
 
     def get_swing_state(self, data: dict) -> str:
         """Get the current swing state from response data."""
@@ -534,14 +562,47 @@ class DaikinBRP084(Appliance):
 
         self._register_energy_consumption_history()
 
+    def _safe_dsiot_numeric(self, response: dict, path_key: str) -> Optional[float]:
+        """Extract an optional DSIOT binary-step numeric property."""
+        try:
+            node = self.find_node_by_pn(response, *self.get_path(path_key))
+            return self.decode_dsiot_numeric(node) if node is not None else None
+        except (DaikinException, KeyError, TypeError, ValueError):
+            return None
+
+    def _extract_runtime_readings(self, response: dict) -> None:
+        """Extract per-head runtime and load values."""
+        # Per-head working state and indoor-unit Delta-D command. The indoor
+        # p_02 flag is authoritative; the outdoor flag is retained as a
+        # diagnostic corroborator because it can represent shared ODU state.
+        for key in ("working", "outdoor_working", "idu_delta_d_command"):
+            value = self._safe_dsiot_numeric(response, key)
+            if value is not None:
+                self.values[key] = int(value) if value.is_integer() else value
+
+        indoor_working = self.values.get("working", invalidate=False)
+        outdoor_working = self.values.get("outdoor_working", invalidate=False)
+        if (
+            indoor_working is not None
+            and outdoor_working is not None
+            and bool(indoor_working) != bool(outdoor_working)
+        ):
+            _LOGGER.debug(
+                "Indoor and outdoor working flags disagree: indoor=%s outdoor=%s",
+                indoor_working,
+                outdoor_working,
+            )
+
     def _extract_optional_readings(self, response):
         """Extract optional values that not all firmware/models expose.
 
-        Covers the on/off feature toggles, the active-mode vertical vane
-        position, adapter capability/firmware info and outdoor-unit sensors.
-        Each read is guarded individually so a missing container just leaves
-        that value unset rather than failing the whole status update.
+        Covers runtime/load values, the on/off feature toggles, the active-mode
+        vertical vane position, adapter capability/firmware info and outdoor
+        unit readings. Each read is guarded individually so a missing container
+        just leaves that value unset rather than failing the whole status update.
         """
+        self._extract_runtime_readings(response)
+
         # On/off feature toggles (comfort/econo/outdoor_quiet/powerful).
         for key in self.POWER_TOGGLES:
             try:
@@ -584,15 +645,12 @@ class DaikinBRP084(Appliance):
         except DaikinException:
             pass
 
-        # Outdoor-unit compressor temperature.
-        try:
-            self.values['cmp_temp'] = str(
-                self.hex_le_to_temp(
-                    self.find_value_by_pn(response, *self.get_path("compressor_temp"))
-                )
-            )
-        except DaikinException:
-            pass
+        # Shared outdoor-unit instantaneous input power. This DSIOT property
+        # uses binary-step metadata; on observed units md.st=0x11 converts raw
+        # 25 to 250 W. It is not a compressor temperature.
+        power = self._safe_dsiot_numeric(response, "instantaneous_power")
+        if power is not None:
+            self.values["instantaneous_power"] = power
 
         # Decoded model strings.
         for key, path_key in (
@@ -980,14 +1038,45 @@ class DaikinBRP084(Appliance):
         return self.values.get('powerful')
 
     @property
-    def support_compressor_temperature(self) -> bool:
-        """Return True if the device reports outdoor compressor temperature."""
-        return 'cmp_temp' in self.values
+    def support_working_status(self) -> bool:
+        """Return True if the device reports per-head working status."""
+        return "working" in self.values
 
     @property
-    def compressor_temperature(self) -> Optional[float]:
-        """Return outdoor compressor temperature in Celsius (approximate)."""
-        return self._parse_number('cmp_temp')
+    def is_working(self) -> Optional[bool]:
+        """Return whether this indoor unit is actively working."""
+        value = self.values.get("working")
+        return bool(value) if value is not None else None
+
+    @property
+    def is_cooling(self) -> bool:
+        """Return whether this indoor unit is actively cooling."""
+        return self.is_working is True and self.values.get("mode") == "cool"
+
+    @property
+    def is_heating(self) -> bool:
+        """Return whether this indoor unit is actively heating."""
+        return self.is_working is True and self.values.get("mode") == "hot"
+
+    @property
+    def support_idu_delta_d_command(self) -> bool:
+        """Return True if the device reports indoor-unit Delta-D command."""
+        return "idu_delta_d_command" in self.values
+
+    @property
+    def idu_delta_d_command(self) -> Optional[float]:
+        """Return the read-only indoor-unit Delta-D load command."""
+        return self._parse_number("idu_delta_d_command")
+
+    @property
+    def support_instantaneous_power_consumption(self) -> bool:
+        """Return True if the outdoor unit reports instantaneous power."""
+        return "instantaneous_power" in self.values
+
+    @property
+    def instantaneous_power_consumption(self) -> Optional[float]:
+        """Return shared outdoor-unit instantaneous power in watts."""
+        return self._parse_number("instantaneous_power")
 
     @property
     def model(self) -> Optional[str]:

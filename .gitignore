@@ -13,3 +13,4 @@ venv/
 .vscode
 .python-version
 .DS_Store
+.scratch/

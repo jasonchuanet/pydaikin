@@ -1,5 +1,8 @@
 default_language_version:
     python: python3.12
+# The vendored Home Assistant 2026.8 custom integration targets Python 3.14
+# and is validated separately in a matching Home Assistant environment.
+exclude: ^custom_components/
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.2

@@ -62,8 +62,18 @@ async def test_daikin_brp084(aresponses, client_session):
                                 {
                                     "pn": "e_3003",
                                     "pch": [
+                                        {
+                                            "pn": "p_02",
+                                            "pv": "01",
+                                            "md": {"pt": "b", "st": 1},
+                                        },  # Indoor unit working
                                         {"pn": "p_1D", "pv": "00"},  # Comfort OFF
                                         {"pn": "p_24", "pv": "00"},  # Econo OFF
+                                        {
+                                            "pn": "p_2A",
+                                            "pv": "02",
+                                            "md": {"pt": "b", "st": 1},
+                                        },  # Indoor Delta-D command
                                     ],
                                 },
                                 {
@@ -101,9 +111,20 @@ async def test_daikin_brp084(aresponses, client_session):
                                     "pch": [
                                         {
                                             "pn": "p_01",
-                                            "pv": "8C0000",
-                                        },  # Compressor 70°C
+                                            "pv": "190000",
+                                            "md": {"pt": "b", "st": 0x11},
+                                        },  # Shared ODU instantaneous power: 250 W
                                         {"pn": "p_02", "pv": "410000"},
+                                    ],
+                                },
+                                {
+                                    "pn": "e_2006",
+                                    "pch": [
+                                        {
+                                            "pn": "p_01",
+                                            "pv": "01",
+                                            "md": {"pt": "b", "st": 1},
+                                        }
                                     ],
                                 },
                                 {
@@ -207,7 +228,7 @@ async def test_daikin_brp084(aresponses, client_session):
     assert device.values.get('f_dir') == 'off'
     assert device.values.get('mac') == '112233445566'
 
-    # New reads: comfort airflow, capabilities, outdoor sensors, models
+    # New reads: runtime/load, comfort airflow, capabilities, power, models
     assert device.values.get('comfort') == 'off'
     assert device.support_comfort_mode is True
     assert device.comfort_mode == 'off'
@@ -215,8 +236,14 @@ async def test_daikin_brp084(aresponses, client_session):
     assert device.firmware_version == '3_12_3'
     assert device.values.get('api_ver') == '2_2'
     assert device.outside_temperature == 17.0  # LE 2-byte decode
-    assert device.compressor_temperature == 70.0
-    assert device.support_compressor_temperature is True
+    assert device.is_working is True
+    assert device.is_cooling is True
+    assert device.is_heating is False
+    assert device.support_working_status is True
+    assert device.idu_delta_d_command == 2
+    assert device.support_idu_delta_d_command is True
+    assert device.instantaneous_power_consumption == 250
+    assert device.support_instantaneous_power_consumption is True
     assert device.model == 'AMVA17MXTF'
     assert device.outdoor_model == 'AMVA17MXR'
     assert device.values.get('datas') == '100/200/300/400/500/600/700'
@@ -580,6 +607,40 @@ def test_split_energy_used_when_cool_heat_available():
 def test_hex_le_to_temp(value, expected):
     """Little-endian signed temperature decoding (handles sub-zero)."""
     assert DaikinBRP084.hex_le_to_temp(value) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, step, expected",
+    [
+        ("190000", 0x11, 250.0),
+        ("23", 0xF1, 3.5),
+    ],
+)
+def test_decode_dsiot_numeric(raw, step, expected):
+    """Binary-step properties apply their signed decimal exponent."""
+    node = {"pv": raw, "md": {"pt": "b", "st": step}}
+
+    assert DaikinBRP084.decode_dsiot_numeric(node) == expected
+
+
+@pytest.mark.parametrize(
+    "mode, working, is_cooling, is_heating",
+    [
+        ("cool", 1, True, False),
+        ("hot", 1, False, True),
+        ("cool", 0, False, False),
+        ("hot", 0, False, False),
+        ("auto", 1, False, False),
+    ],
+)
+def test_runtime_activity_properties(mode, working, is_cooling, is_heating):
+    """Cooling and heating require both matching mode and active work."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.values.update({"mode": mode, "working": working})
+
+    assert device.is_working is bool(working)
+    assert device.is_cooling is is_cooling
+    assert device.is_heating is is_heating
 
 
 @pytest.mark.parametrize(
@@ -1159,8 +1220,23 @@ def test_extract_optional_readings_guards_missing_containers():
     # DaikinException and is swallowed.
     device._extract_optional_readings({'responses': []})
 
-    for key in ('comfort', 'econo', 'outdoor_quiet', 'powerful', 'vane_vertical'):
+    for key in (
+        "working",
+        "outdoor_working",
+        "idu_delta_d_command",
+        "instantaneous_power",
+        'comfort',
+        'econo',
+        'outdoor_quiet',
+        'powerful',
+        'vane_vertical',
+    ):
         assert key not in device.values
+
+    assert device.support_working_status is False
+    assert device.is_working is None
+    assert device.support_idu_delta_d_command is False
+    assert device.idu_delta_d_command is None
 
 
 def test_dry_comfort_offset_missing_optional_reading_stays_unsupported():

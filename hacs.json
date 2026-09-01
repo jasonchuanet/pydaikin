@@ -1,0 +1,5 @@
+{
+  "name": "Daikin AC (BRP084 runtime telemetry)",
+  "render_readme": true,
+  "homeassistant": "2026.8.0"
+}

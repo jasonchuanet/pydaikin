@@ -33,6 +33,9 @@ Issues = "https://github.com/fredrike/pydaikin/issues"
 [tool.setuptools]
 script-files = ['bin/pydaikin']
 
+[tool.setuptools.packages.find]
+include = ["pydaikin*"]
+
 [tool.pytype]
 python_version = 3.12
 

@@ -432,6 +432,46 @@ class Appliance(DaikinPowerMixin):
         return 'cmpfreq' in self.values
 
     @property
+    def support_working_status(self) -> bool:
+        """Return True if the device reports an active working state."""
+        return False
+
+    @property
+    def is_working(self) -> Optional[bool]:
+        """Return whether the appliance is actively working, if available."""
+        return None
+
+    @property
+    def is_cooling(self) -> bool:
+        """Return whether the appliance is actively cooling."""
+        return False
+
+    @property
+    def is_heating(self) -> bool:
+        """Return whether the appliance is actively heating."""
+        return False
+
+    @property
+    def support_idu_delta_d_command(self) -> bool:
+        """Return True if the device reports indoor-unit Delta-D command."""
+        return False
+
+    @property
+    def idu_delta_d_command(self) -> Optional[float]:
+        """Return the read-only indoor-unit Delta-D load command."""
+        return None
+
+    @property
+    def support_instantaneous_power_consumption(self) -> bool:
+        """Return True if the device reports instantaneous power."""
+        return False
+
+    @property
+    def instantaneous_power_consumption(self) -> Optional[float]:
+        """Return instantaneous power in watts, if available."""
+        return None
+
+    @property
     def support_filter_dirty(self) -> bool:
         """Return True if the device supports dirty filter notification and it is turned on."""
         return (

@@ -1,0 +1,14 @@
+{
+  "domain": "daikin",
+  "name": "Daikin AC",
+  "codeowners": ["@jasonchuanet"],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/daikin",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/jasonchuanet/pydaikin/issues",
+  "loggers": ["pydaikin"],
+  "requirements": ["pydaikin @ git+https://github.com/jasonchuanet/pydaikin.git@master"],
+  "version": "2026.8.3.1",
+  "zeroconf": ["_dkapi._tcp.local."]
+}
