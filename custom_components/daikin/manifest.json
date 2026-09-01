@@ -9,6 +9,6 @@
   "issue_tracker": "https://github.com/jasonchuanet/pydaikin/issues",
   "loggers": ["pydaikin"],
   "requirements": ["pydaikin @ git+https://github.com/jasonchuanet/pydaikin.git@master"],
-  "version": "2026.8.3.1",
+  "version": "2026.8.3.2",
   "zeroconf": ["_dkapi._tcp.local."]
 }

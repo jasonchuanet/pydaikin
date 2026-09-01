@@ -106,6 +106,11 @@ BRP084 devices expose two useful read-only indoor-unit values:
 Outdoor `e_A005/p_01` is decoded using its DSIOT binary-step metadata as shared
 instantaneous outdoor-unit power in watts.
 
+The BRP084's dedicated Econo and Powerful controls are also exposed on the
+Home Assistant climate entity as the standard `eco` and `boost` presets.
+Selecting `none` disables the active preset; enabling either preset follows the
+unit's built-in mutual-exclusion behavior.
+
 ### Testing the fork in Home Assistant with HACS
 
 This fork includes a development override of Home Assistant's built-in
@@ -121,9 +126,10 @@ requirement.
 4. Reload each Daikin device or restart once more if dependency installation
    occurred during startup.
 5. Inspect the climate entity's `hvac_action`: a unit configured for cooling or
-   heating now reports `idle` when `is_working` is false. Compare the diagnostic
-   **Indoor unit Delta-D command** sensor against Skyport while changing setpoint,
-   fan speed and humidity conditions.
+   heating now reports `idle` when `is_working` is false. The preset selector
+   offers **Eco** and **Boost** on BRP084 units. Compare the diagnostic **Indoor
+   unit Delta-D command** sensor against Skyport while changing setpoint, fan
+   speed and humidity conditions.
 
 To return to the built-in integration, remove this custom repository from HACS,
 delete the custom integration when prompted, and restart Home Assistant. Existing

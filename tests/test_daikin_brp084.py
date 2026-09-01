@@ -256,6 +256,8 @@ async def test_daikin_brp084(aresponses, client_session):
     assert device.econo_mode == 'off' and device.support_econo_mode
     assert device.outdoor_quiet_mode == 'off' and device.support_outdoor_quiet_mode
     assert device.powerful_mode == 'off' and device.support_powerful_mode
+    assert device.support_advanced_modes is True
+    assert device.represent("adv")[1] == "off"
 
     # Test setting temperature
     await device.set({'stemp': '26.0'})
@@ -1158,6 +1160,29 @@ async def test_set_dry_comfort_offset_delegates_to_set():
     device.set.assert_awaited_once_with({"dry_comfort_offset": -1.5})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["econo", "powerful"])
+async def test_set_advanced_mode_delegates_to_brp084_toggle(mode):
+    """Home Assistant presets delegate to the BRP084 feature toggles."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.set = AsyncMock()
+
+    await device.set_advanced_mode(mode, "on")
+
+    device.set.assert_awaited_once_with({mode: "on"})
+
+
+def test_advanced_mode_support_requires_both_presets():
+    """Only advertise the paired Home Assistant presets when both exist."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+
+    assert device.support_advanced_modes is False
+    device.values["econo"] = "off"
+    assert device.support_advanced_modes is False
+    device.values["powerful"] = "off"
+    assert device.support_advanced_modes is True
+
+
 @pytest.mark.parametrize(
     'values, support, current',
     [
@@ -1844,7 +1869,7 @@ def test_handle_temperature_setting_unsupported_mode():
     [
         ('set_streamer', ('on',), "Streamer mode not supported"),
         ('set_holiday', ('on',), "Holiday mode not supported"),
-        ('set_advanced_mode', ('powerful', '1'), "Advanced mode not supported"),
+        ('set_advanced_mode', ('streamer', 'on'), "not supported"),
     ],
 )
 async def test_unsupported_firmware_features(caplog, method, args, message):
@@ -1864,7 +1889,7 @@ async def test_unsupported_firmware_features(caplog, method, args, message):
     ['support_away_mode', 'support_advanced_modes', 'support_zone_count'],
 )
 def test_unsupported_support_flags(prop):
-    """Away/advanced/zone support are all False on firmware 2.8.0."""
+    """Unavailable features are False before BRP084 capabilities are read."""
     mock_session = MagicMock()
     device = DaikinBRP084('127.0.0.1', session=mock_session)
 

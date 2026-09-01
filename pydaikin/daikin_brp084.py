@@ -611,6 +611,17 @@ class DaikinBRP084(Appliance):
             except DaikinException:
                 pass
 
+        # The bundled Home Assistant climate entity uses the legacy ``adv``
+        # value to expose Econo and Boost presets. BRP084 reports these as
+        # dedicated toggles, so provide the equivalent aggregate state.
+        if self.support_advanced_modes:
+            if self.powerful_mode == "on":
+                self.values["adv"] = "powerful"
+            elif self.econo_mode == "on":
+                self.values["adv"] = "econo"
+            else:
+                self.values["adv"] = "off"
+
         # Current vertical vane position for the active mode.
         try:
             if self.values['mode'] in self.API_PATHS["swing_settings"]:
@@ -926,10 +937,12 @@ class DaikinBRP084(Appliance):
         """Set holiday mode."""
         _LOGGER.debug("Holiday mode not supported in firmware 2.8.0")
 
-    # pylint: disable=unused-argument
     async def set_advanced_mode(self, mode, value):
-        """Set advanced mode."""
-        _LOGGER.debug("Advanced mode not supported in firmware 2.8.0")
+        """Enable or disable an advanced mode exposed by the BRP084 API."""
+        if mode not in ("econo", "powerful"):
+            _LOGGER.debug("Advanced mode %s not supported in firmware 2.8.0", mode)
+            return
+        await self.set({mode: value})
 
     @property
     def support_away_mode(self) -> bool:
@@ -938,8 +951,8 @@ class DaikinBRP084(Appliance):
 
     @property
     def support_advanced_modes(self) -> bool:
-        """Advanced mode not supported in firmware 2.8.0"""
-        return False
+        """Return True when both Home Assistant preset modes are available."""
+        return self.support_econo_mode and self.support_powerful_mode
 
     @property
     def support_zone_count(self) -> bool:
