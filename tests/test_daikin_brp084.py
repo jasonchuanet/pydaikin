@@ -1184,6 +1184,31 @@ def test_advanced_mode_support_requires_both_presets():
 
 
 @pytest.mark.parametrize(
+    "values, expected",
+    [
+        ({}, None),
+        ({"econo": "on"}, None),
+        ({"powerful": "on"}, None),
+        ({"econo": "off", "powerful": "off"}, "off"),
+        ({"econo": "on", "powerful": "off"}, "econo"),
+        ({"econo": "off", "powerful": "on"}, "powerful"),
+        ({"econo": "on", "powerful": "on"}, "powerful"),
+    ],
+)
+def test_optional_readings_expose_home_assistant_presets(values, expected):
+    """Preset state requires both toggles, with Boost taking priority."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.values.update({"mode": "cool", **values})
+
+    device._extract_optional_readings({"responses": []})
+
+    if expected is None:
+        assert "adv" not in device.values
+    else:
+        assert device.represent("adv")[1] == expected
+
+
+@pytest.mark.parametrize(
     'values, support, current',
     [
         ({'comfort': 'on'}, ('support_comfort_mode', 'comfort_mode'), 'on'),
@@ -1329,6 +1354,123 @@ def test_get_path_errors(key, message):
 def test_find_value_by_pn_no_keys():
     """find_value_by_pn with no keys returns None."""
     assert DaikinBRP084.find_value_by_pn({'responses': []}, 'fr') is None
+
+
+def test_find_value_by_pn_skips_entries_without_pn():
+    """Entries lacking a 'pn' key are skipped instead of raising KeyError.
+
+    Regression test for https://github.com/home-assistant/core/issues/179963:
+    firmware 3.15.0-g4 returns pc nodes without 'pn', which used to abort
+    setup with KeyError: 'pn'.
+    """
+    response = {
+        "responses": [
+            {
+                "fr": "/dsiot/edge/adr_0100.i_power.week_power",
+                "pc": {
+                    "pn": "week_power",
+                    "pch": [
+                        {"pv": "999"},  # malformed: no 'pn'
+                        {"pn": "today_runtime", "pv": "120"},
+                    ],
+                },
+            }
+        ]
+    }
+
+    value = DaikinBRP084.find_value_by_pn(
+        response,
+        "/dsiot/edge/adr_0100.i_power.week_power",
+        "week_power",
+        "today_runtime",
+    )
+    assert value == "120"
+
+
+def test_find_value_by_pn_missing_key_raises_daikin_exception():
+    """A genuinely missing key raises DaikinException, not KeyError."""
+    response = {
+        "responses": [
+            {
+                "fr": "/dsiot/edge/adr_0100.i_power.week_power",
+                "pc": {"pn": "week_power", "pch": [{"pv": "999"}]},
+            }
+        ]
+    }
+
+    with pytest.raises(DaikinException, match="Key today_runtime not found"):
+        DaikinBRP084.find_value_by_pn(
+            response,
+            "/dsiot/edge/adr_0100.i_power.week_power",
+            "week_power",
+            "today_runtime",
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_status_tolerates_energy_response_without_pn():
+    """A week_power payload with pn-less nodes does not abort update_status.
+
+    Mirrors the failure in https://github.com/home-assistant/core/issues/179963:
+    energy/runtime data must be optional so device setup can complete.
+    """
+    device = DaikinBRP084('ip', session=MagicMock())
+    device._get_resource = AsyncMock(
+        return_value={
+            "responses": [
+                {
+                    "fr": "/dsiot/edge/adr_0100.dgc_status",
+                    "pc": {
+                        "pn": "dgc_status",
+                        "pch": [
+                            {
+                                "pn": "e_1002",
+                                "pch": [
+                                    {
+                                        "pn": "e_A002",
+                                        "pch": [{"pn": "p_01", "pv": "01"}],
+                                    },
+                                    {
+                                        "pn": "e_3001",
+                                        "pch": [
+                                            {"pn": "p_01", "pv": "0200"},
+                                            {"pn": "p_02", "pv": "32"},
+                                            {"pn": "p_09", "pv": "0A00"},
+                                            {"pn": "p_05", "pv": "000000"},
+                                            {"pn": "p_06", "pv": "000000"},
+                                        ],
+                                    },
+                                    {
+                                        "pn": "e_A00B",
+                                        "pch": [{"pn": "p_01", "pv": "18"}],
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "fr": "/dsiot/edge/adr_0100.i_power.week_power",
+                    # Malformed: children lack 'pn' (firmware 3.15.0-g4).
+                    "pc": {"pn": "week_power", "pch": [{"pv": "999"}]},
+                },
+                {
+                    "fr": "/dsiot/edge.adp_i",
+                    "pc": {
+                        "pn": "adp_i",
+                        "pch": [{"pn": "mac", "pv": "112233445566"}],
+                    },
+                },
+            ]
+        }
+    )
+
+    await device.update_status()
+
+    assert device.values['mode'] == 'cool'
+    assert device.values['mac'] == '112233445566'
+    assert 'today_runtime' not in device.values
+    assert 'datas' not in device.values
 
 
 def _swing_state_response(vertical, horizontal):
@@ -1751,6 +1893,7 @@ async def test_update_status_auto_mode_missing_temp_setpoint(
     assert device.values['mac'] == '112233445566'
 
 
+@pytest.mark.asyncio
 async def test_update_status_dry_comfort_offset():
     """Dry comfort offset is exposed separately from target temperature."""
     device = DaikinBRP084("ip", session=MagicMock())

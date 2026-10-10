@@ -127,6 +127,42 @@ async def test_auto_set_clock(aresponses, client_session):
 
 
 @pytest.mark.asyncio
+async def test_auto_set_clock_sets_clock_when_not_synced(aresponses, client_session):
+    """An adapter reporting sta=0 gets its clock set from the host."""
+    aresponses.add(
+        path_pattern="/common/get_datetime",
+        method_pattern="GET",
+        response="ret=OK,sta=0,cur=-,reg=eu,dst=1,zone=197",
+    )
+    aresponses.add(
+        path_pattern="/common/notify_date_time",
+        method_pattern="GET",
+        response="ret=OK",
+    )
+
+    device = DaikinBRP069("192.168.1.100", session=client_session)
+    await device.auto_set_clock()
+
+    aresponses.assert_all_requests_matched()
+
+
+@pytest.mark.asyncio
+async def test_auto_set_clock_keeps_synced_clock(aresponses, client_session):
+    """An adapter reporting sta=1 is left alone."""
+    aresponses.add(
+        path_pattern="/common/get_datetime",
+        method_pattern="GET",
+        response="ret=OK,sta=1,cur=2026/9/12 10:0:0,reg=eu,dst=1,zone=197",
+    )
+
+    device = DaikinBRP069("192.168.1.100", session=client_session)
+    await device.auto_set_clock()
+
+    # No notify_date_time route was registered: a call would have failed.
+    aresponses.assert_all_requests_matched()
+
+
+@pytest.mark.asyncio
 async def test_auto_set_clock_error_handling(aresponses, client_session):
     """Test auto_set_clock error handling."""
     # Mock error response - the error is caught so request completes.
@@ -287,3 +323,46 @@ async def test_update_status_demand_control_remapping(aresponses, client_session
         "aircon/get_demand_control", invalidate=False
     )
     assert raw["mode"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_led_unsupported(aresponses, client_session):
+    """Adapters without a ``led`` field report no LED support."""
+    device = DaikinBRP069("192.168.1.100", session=client_session)
+    device.values.update_by_resource("common/basic_info", {"mac": "80D21DCCAEE2"})
+
+    assert device.support_led is False
+    assert device.get_led() == "None"
+    assert device.wifi_signal is None
+
+
+@pytest.mark.asyncio
+async def test_set_led(aresponses, client_session):
+    """set_led sends common/set_led and updates the cached value."""
+    aresponses.add(
+        path_pattern="/common/set_led",
+        method_pattern="GET",
+        response="ret=OK",
+    )
+
+    device = DaikinBRP069("192.168.1.100", session=client_session)
+    device.values.update_by_resource("common/basic_info", {"led": "1", "radio1": "-45"})
+
+    assert device.support_led is True
+    assert device.get_led() == "on"
+    assert device.wifi_signal == -45
+
+    await device.set_led("off")
+
+    assert device.get_led() == "off"
+    assert device.values["led"] == "0"
+    aresponses.assert_all_requests_matched()
+
+
+@pytest.mark.asyncio
+async def test_wifi_signal_invalid(aresponses, client_session):
+    """A non-numeric radio1 value yields None instead of raising."""
+    device = DaikinBRP069("192.168.1.100", session=client_session)
+    device.values.update_by_resource("common/basic_info", {"radio1": "-"})
+
+    assert device.wifi_signal is None

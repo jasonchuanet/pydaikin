@@ -352,22 +352,27 @@ class DaikinBRP084(Appliance):
 
     @staticmethod
     def find_node_by_pn(data: dict, fr: str, *keys) -> Optional[dict]:
-        """Find a property node in nested response data."""
-        data = [x['pc'] for x in data['responses'] if x['fr'] == fr]
+        """Find a property node in nested response data.
+
+        Tolerates malformed entries: some firmwares (e.g. 3.15.0-g4) return
+        ``pc`` nodes without a ``pn`` (or without a ``pch`` container), which
+        must be skipped instead of raising ``KeyError``.
+        """
+        data = [x["pc"] for x in data["responses"] if x.get("fr") == fr and "pc" in x]
 
         while keys:
             current_key = keys[0]
             keys = keys[1:]
             found = False
             for pcs in data:
-                if pcs['pn'] == current_key:
+                if pcs.get("pn") == current_key:
                     if not keys:
                         return pcs
-                    data = pcs['pch']
+                    data = pcs.get("pch") or []
                     found = True
                     break
             if not found:
-                raise DaikinException(f'Key {current_key} not found')
+                raise DaikinException(f"Key {current_key} not found")
         return None
 
     @classmethod
@@ -593,6 +598,18 @@ class DaikinBRP084(Appliance):
                 outdoor_working,
             )
 
+    def _update_advanced_mode(self) -> None:
+        """Update the Home Assistant preset state from BRP084 feature toggles."""
+        if not self.support_advanced_modes:
+            return
+
+        if self.powerful_mode == "on":
+            self.values["adv"] = "powerful"
+        elif self.econo_mode == "on":
+            self.values["adv"] = "econo"
+        else:
+            self.values["adv"] = "off"
+
     def _extract_optional_readings(self, response):
         """Extract optional values that not all firmware/models expose.
 
@@ -614,13 +631,7 @@ class DaikinBRP084(Appliance):
         # The bundled Home Assistant climate entity uses the legacy ``adv``
         # value to expose Econo and Boost presets. BRP084 reports these as
         # dedicated toggles, so provide the equivalent aggregate state.
-        if self.support_advanced_modes:
-            if self.powerful_mode == "on":
-                self.values["adv"] = "powerful"
-            elif self.econo_mode == "on":
-                self.values["adv"] = "econo"
-            else:
-                self.values["adv"] = "off"
+        self._update_advanced_mode()
 
         # Current vertical vane position for the active mode.
         try:

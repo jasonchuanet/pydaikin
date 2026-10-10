@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import logging
+from typing import Optional
 
 from .daikin_base import Appliance
 
@@ -63,6 +64,10 @@ class DaikinBRP069(Appliance):
             '1': 'on',
         },
         "en_demand": {
+            "0": "off",
+            "1": "on",
+        },
+        "led": {
             "0": "off",
             "1": "on",
         },
@@ -361,11 +366,54 @@ class DaikinBRP069(Appliance):
             _LOGGER.error('Raised "%s" while setting internal clock', exc)
 
     async def auto_set_clock(self):
-        """Tells the AC to auto-set its internal clock."""
+        """Tells the AC to auto-set its internal clock, and sets it when it cannot.
+
+        Adapters that are not connected to the Daikin cloud (``method=home only``)
+        never learn the time by themselves: ``common/get_datetime`` keeps answering
+        ``sta=0`` and every ``aircon/get_*_power_ex`` request fails with
+        ``ret=NG (time is not sync)``, so energy consumption is unavailable. When
+        the adapter reports an unset clock we push the current UTC time ourselves.
+        """
         try:
-            await self._get_resource('common/get_datetime', {"cur": ""})
+            status = await self._get_resource('common/get_datetime', {"cur": ""})
         except Exception as exc:  # pylint: disable=broad-except
             _LOGGER.error('Raised "%s" while trying to auto-set internal clock', exc)
+            return
+
+        if status.get("sta") == "0":
+            _LOGGER.info(
+                "Clock of %s is not set (sta=0), setting it from the host",
+                self.device_ip,
+            )
+            await self.set_clock()
+
+    @property
+    def support_led(self) -> bool:
+        """Return True if the Wi-Fi adapter exposes its status LED.
+
+        The ``led`` field of ``/common/basic_info`` is only present on adapters
+        whose LED can be switched (BRP069A/B/C).
+        """
+        return self.values.get("led", invalidate=False) is not None
+
+    def get_led(self):
+        """Return the cached state of the adapter LED: ``"on"`` or ``"off"``."""
+        return self.daikin_to_human("led", self.values.get("led"))
+
+    async def set_led(self, led):
+        """Switch the status LED of the Wi-Fi adapter ``"on"`` or ``"off"``."""
+        value = self.human_to_daikin("led", led)
+        await self._get_resource("common/set_led", {"led": value})
+        self.values.update_by_resource("common/basic_info", {"led": value})
+
+    @property
+    def wifi_signal(self) -> Optional[int]:
+        """Return the Wi-Fi signal strength of the adapter in dBm (``radio1``)."""
+        radio1 = self.values.get("radio1", invalidate=False)
+        try:
+            return int(radio1)
+        except (TypeError, ValueError):
+            return None
 
     @property
     def support_demand_control(self) -> bool:
