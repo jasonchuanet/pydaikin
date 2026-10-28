@@ -5,7 +5,7 @@
 from dataclasses import dataclass, field
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from aiohttp import ClientSession
 
@@ -122,6 +122,12 @@ class DaikinBRP084(Appliance):
         # Outdoor-unit runtime corroboration and shared instantaneous power.
         "outdoor_working": E_1003_PATH + ["e_2006", "p_01"],
         "instantaneous_power": E_1003_PATH + ["e_A005", "p_01"],
+        # Outdoor unit compressor state (e_2006): p_01 is a run flag, p_04 the
+        # operating frequency in Hz as a little-endian uint16. Found by sweeping
+        # the setpoint on an FTXM71 (adapter firmware 3.12.3) and watching which
+        # nodes tracked the compressor; not every model exposes e_2006.
+        "compressor_running": E_1003_PATH + ["e_2006", "p_01"],
+        "compressor_frequency": E_1003_PATH + ["e_2006", "p_04"],
         "indoor_model": E_1002_PATH + ["e_A001", "p_01"],
         "outdoor_model": E_1003_PATH + ["e_A001", "p_01"],
         # Mode-specific paths for temperature settings
@@ -428,17 +434,31 @@ class DaikinBRP084(Appliance):
         except DaikinException:
             return None
 
-    def _safe_hex_temp(self, response: dict, path_key: str, divisor: int = 2) -> str:
+    def _safe_hex_temp(
+        self,
+        response: dict,
+        path_key: str,
+        divisor: int = 2,
+        decoder: Optional[Callable[[str, int], float]] = None,
+    ) -> str:
         """Extract a temperature value, returning '--' if missing or null.
 
         Decodes as a little-endian signed value so sub-zero outdoor readings
         (two's complement, e.g. a negative outdoor temperature) are handled
         correctly rather than being read from the first byte only.
+
+        Args:
+            response: The decoded ``/dsiot/multireq`` response.
+            path_key: Key into ``API_PATHS`` naming the datapoint to read.
+            divisor: Divisor applied to the decoded value.
+            decoder: Conversion to apply, defaulting to ``hex_le_to_temp``.
+                Sensors reporting a single unsigned byte pass ``hex_to_temp``.
         """
+        decode = self.hex_le_to_temp if decoder is None else decoder
         try:
             raw = self.find_value_by_pn(response, *self.get_path(path_key))
             if raw is not None:
-                return str(self.hex_le_to_temp(raw, divisor))
+                return str(decode(raw, divisor))
         except DaikinException:
             pass
         return "--"
@@ -495,11 +515,8 @@ class DaikinBRP084(Appliance):
             # guarded so a missing/null sensor yields '--' rather than crashing.
             self.values['otemp'] = self._safe_hex_temp(response, "outdoor_temp")
 
-            self.values['htemp'] = str(
-                self.hex_to_temp(
-                    self.find_value_by_pn(response, *self.get_path("indoor_temp")),
-                    divisor=1,
-                )
+            self.values['htemp'] = self._safe_hex_temp(
+                response, "indoor_temp", divisor=1, decoder=self.hex_to_temp
             )
 
             # Get humidity
@@ -598,6 +615,20 @@ class DaikinBRP084(Appliance):
                 outdoor_working,
             )
 
+    def _extract_compressor_readings(self, response: dict) -> None:
+        """Extract optional outdoor compressor frequency and run state."""
+        # Use the base class's cmpfreq field so its frequency sensor works.
+        raw = self._safe_extract(response, *self.get_path("compressor_frequency"))
+        if raw is not None and len(raw) >= 4:
+            try:
+                self.values["cmpfreq"] = str(self.hex_le_to_int(raw[:4]))
+            except ValueError:
+                pass
+
+        raw = self._safe_extract(response, *self.get_path("compressor_running"))
+        if raw is not None:
+            self.values["compressor_running"] = "1" if raw == "01" else "0"
+
     def _update_advanced_mode(self) -> None:
         """Update the Home Assistant preset state from BRP084 feature toggles."""
         if not self.support_advanced_modes:
@@ -666,6 +697,8 @@ class DaikinBRP084(Appliance):
             )
         except DaikinException:
             pass
+
+        self._extract_compressor_readings(response)
 
         # Shared outdoor-unit instantaneous input power. This DSIOT property
         # uses binary-step metadata; on observed units md.st=0x11 converts raw
@@ -1101,6 +1134,17 @@ class DaikinBRP084(Appliance):
     def instantaneous_power_consumption(self) -> Optional[float]:
         """Return shared outdoor-unit instantaneous power in watts."""
         return self._parse_number("instantaneous_power")
+
+    @property
+    def support_compressor_running(self) -> bool:
+        """Return True if the device reports whether the compressor runs."""
+        return "compressor_running" in self.values
+
+    @property
+    def compressor_running(self) -> Optional[bool]:
+        """Return True while the outdoor compressor is running."""
+        raw = self.values.get("compressor_running")
+        return None if raw is None else raw == "1"
 
     @property
     def model(self) -> Optional[str]:

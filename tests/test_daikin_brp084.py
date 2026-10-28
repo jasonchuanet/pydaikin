@@ -124,7 +124,8 @@ async def test_daikin_brp084(aresponses, client_session):
                                             "pn": "p_01",
                                             "pv": "01",
                                             "md": {"pt": "b", "st": 1},
-                                        }
+                                        },
+                                        {"pn": "p_04", "pv": "3400"},
                                     ],
                                 },
                                 {
@@ -244,6 +245,11 @@ async def test_daikin_brp084(aresponses, client_session):
     assert device.support_idu_delta_d_command is True
     assert device.instantaneous_power_consumption == 250
     assert device.support_instantaneous_power_consumption is True
+    assert "cmp_temp" not in device.values
+    assert device.compressor_frequency == 52.0
+    assert device.support_compressor_frequency is True
+    assert device.compressor_running is True
+    assert device.support_compressor_running is True
     assert device.model == 'AMVA17MXTF'
     assert device.outdoor_model == 'AMVA17MXR'
     assert device.values.get('datas') == '100/200/300/400/500/600/700'
@@ -2053,3 +2059,130 @@ async def test_get_resource_http_error(aresponses, client_session):
     device = DaikinBRP084('ip', session=client_session)
     with pytest.raises(ClientResponseError):
         await device._get_resource("")
+
+
+def _indoor_temp_response(pv):
+    """Build a minimal dgc_status response carrying the indoor temperature."""
+    return {
+        "responses": [
+            {
+                "fr": "/dsiot/edge/adr_0100.dgc_status",
+                "pc": {
+                    "pn": "dgc_status",
+                    "pch": [
+                        {
+                            "pn": "e_1002",
+                            "pch": [
+                                {
+                                    "pn": "e_A00B",
+                                    "pch": [{"pn": "p_01", "pv": pv}],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        (_indoor_temp_response("16"), "22.0"),
+        (_indoor_temp_response("00"), "0.0"),
+        # Some indoor units leave e_A00B/p_01 null while the sensor works and
+        # reports elsewhere; this must not abort the whole status update.
+        (_indoor_temp_response(None), "--"),
+        # Firmware that omits the datapoint entirely.
+        ({"responses": []}, "--"),
+    ],
+)
+def test_indoor_temp_tolerates_missing_sensor(response, expected):
+    """Indoor temperature yields '--' when null or absent, as outdoor does."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    assert (
+        device._safe_hex_temp(
+            response, "indoor_temp", divisor=1, decoder=device.hex_to_temp
+        )
+        == expected
+    )
+
+
+def _outdoor_response(entities):
+    """Build a multireq response with the given entities under e_1003."""
+    return {
+        "responses": [
+            {
+                "fr": "/dsiot/edge/adr_0200.dgc_status",
+                "pc": {
+                    "pn": "dgc_status",
+                    "pch": [
+                        {
+                            "pn": "e_1003",
+                            "pch": [
+                                {
+                                    "pn": ent,
+                                    "pch": [
+                                        {"pn": pn, "pv": pv} for pn, pv in props.items()
+                                    ],
+                                }
+                                for ent, props in entities.items()
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "run_flag, freq_hex, running, frequency",
+    [
+        ("01", "3400", True, 52.0),  # modulating
+        ("01", "2C00", True, 44.0),
+        ("00", "0000", False, 0.0),  # stopped
+        ("00", "0001", False, 256.0),  # second byte is significant
+    ],
+)
+def test_compressor_state(run_flag, freq_hex, running, frequency):
+    """e_2006 exposes the compressor run flag and frequency in Hz."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.values["mode"] = "hot"
+
+    device._extract_optional_readings(
+        _outdoor_response({"e_2006": {"p_01": run_flag, "p_04": freq_hex}})
+    )
+
+    assert device.support_compressor_frequency is True
+    assert device.compressor_frequency == frequency
+    assert device.support_compressor_running is True
+    assert device.compressor_running is running
+
+
+def test_compressor_state_absent_on_models_without_e_2006():
+    """Models that do not expose e_2006 keep working, without the values."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.values["mode"] = "hot"
+
+    device._extract_optional_readings(_outdoor_response({"e_A005": {"p_01": "8C00"}}))
+
+    assert device.support_compressor_frequency is False
+    assert device.compressor_frequency is None
+    assert device.support_compressor_running is False
+    assert device.compressor_running is None
+
+
+@pytest.mark.parametrize("freq_hex", ["", "34", "zzzz"])
+def test_compressor_frequency_ignores_malformed_values(freq_hex):
+    """A truncated or non-hex frequency is skipped instead of raising."""
+    device = DaikinBRP084("127.0.0.1", session=MagicMock())
+    device.values["mode"] = "hot"
+
+    device._extract_optional_readings(
+        _outdoor_response({"e_2006": {"p_01": "01", "p_04": freq_hex}})
+    )
+
+    assert device.support_compressor_frequency is False
+    assert device.compressor_running is True
