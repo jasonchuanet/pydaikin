@@ -52,6 +52,29 @@ if __name__ == "__main__":
 
 The `DaikinFactory` automatically detects your device type and firmware version, creating the appropriate device instance.
 
+### Control writes (BRP069)
+
+`device.set()` on BRP069/BRP072C adapters:
+
+* First reads `get_control_info`. If that answer lacks `pow`, `mode`, `stemp` or `shum` (AirBase: `shum` is optional), a `DaikinException` is raised and nothing is written.
+* pydaikin never repeats a request: `set_control_info` is sent once and never retried by the transport, while other endpoints such as `set_led` keep the general transport retry. The only second write is the deliberate whole-degree fallback (see Target temperature step), which sends a different `stemp`. aiohttp itself may resend the identical request once if a reused keep-alive connection drops without an answer.
+* A non-OK `ret` (e.g. `PARAM NG`) raises `DaikinCommandRejected` (with `.ret`), and HTTP 404 raises instead of counting as success. After a rejection the cache shows the state read before the write.
+* After a timeout or another error the outcome is unknown: the state is read back (read only, transport retries included, at most 5 s). If that fails, the cache keeps the last read state without the requested `stemp` and is refetched on the next update.
+* `set()` and `update_status()` are serialised per device, so a poll never runs in the middle of a write.
+
+AirBase (BRP15B61) adapters only get the pre-read validation; their own `set()` keeps the previous write behaviour (lenient reply parsing, transport retries, no rollback, read-back or locking).
+
+### Target temperature step (BRP069)
+
+`device.target_temperature_step` starts optimistic at `0.5` on BRP069/BRP072C adapters and is learned from normal setpoint changes, without probing writes:
+
+* A half-degree `set({'stemp': '23.5'})` that the adapter accepts is read back immediately; `target_temperature_step_status` becomes `"confirmed"`. If the device reports another number, `DaikinVerificationError` (with `requested` and `actual`) is raised; there is no delayed second read. Dry and fan mode have no effective setpoint: nothing is learned there, not even from a matching number, and a `PARAM NG` never falls back. Fan mode accepts and ignores `stemp` (read back `--`), which is not an error. In any other mode, `M`/`--` raises `DaikinVerificationError`. If the mode changed between write and read-back, nothing is learned.
+* If the adapter answers `ret=PARAM NG` to a pure `stemp` change between 18 and 30 °C, the current setpoint is numeric (not `M`/`--`), and 0.5 °C has not been confirmed, the same request is retried once with only `stemp` rounded half up (23.5 → 24). The step becomes `1.0` (`"inferred"`) once 24 is read back; this is an inference, not proof for every mode. If the mode changed before that read-back, `set()` returns normally and nothing is learned. A warning is logged when the step first becomes inferred (later fallbacks log at debug level); set `device.whole_degree_fallback = False` to get the rejection as `DaikinCommandRejected` instead. The retry repeats the `pow`/`mode` of the original request, which were read just before; a remote or app change in that short window would be overwritten.
+* Timeouts and other errors without a device answer never change the step (see Control writes).
+* pydaikin does not persist the learned state. Consumers can store `target_temperature_step_status` and assign it back after creating the device; other values raise `ValueError`. `"inferred"` reports a 1 °C step, and `"confirmed"` disables the fallback. A stale `"inferred"` is corrected by the next accepted half degree, but a stale `"confirmed"` never heals: half degrees are then rejected with `DaikinCommandRejected` instead of falling back. Key a stored status by the adapter's MAC address and firmware version, so that a replaced adapter or a firmware update starts from `"unknown"`.
+
+Other adapters report `1.0`.
+
 ## Firmware Version 2.8.0 Support
 
 Firmware version 2.8.0 introduces a different API structure compared to earlier versions. PyDaikin automatically detects and handles this firmware version.
@@ -142,7 +165,18 @@ Daikin config entries and entity IDs are reused because the domain remains
 
 The following device and firmware combinations are not currently supported:
 
-* BRP069C4x with firmware version 2.0.0
+* BRP069C4x/C8x gateways running Onecta adapter firmware below 2.8.0, such as
+  2.0.0, 2.3.0, 2.6.1 and 2.6.2, and the built-in WiFi adapters of newer units
+  (e.g. the Stylish FTXA20C2V1BW) running firmware 2.6.3 or earlier. These
+  answer UDP discovery with `type=GPF,protocol=DGC` but return 404 for every
+  local HTTP endpoint, so there is no local control API. BRP069C4x/C8x gain
+  local control with firmware 2.8.0 or later; the built-in adapters have no
+  local control API at all, with 2.6.3 being the latest firmware. Until then
+  use a cloud-based integration
+  ([#153](https://github.com/fredrike/pydaikin/issues/153),
+  [#169](https://github.com/fredrike/pydaikin/issues/169),
+  [#83](https://github.com/fredrike/pydaikin/issues/83),
+  [#116](https://github.com/fredrike/pydaikin/issues/116))
 
 ## About
 
